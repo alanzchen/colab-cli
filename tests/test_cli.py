@@ -7,35 +7,40 @@ import pytest
 
 from colab_cli import cli
 from colab_cli.bridge import ColabConnectionTimeoutError
+from colab_cli.runtime import RuntimeServerError
 
 
 class FakeStdout:
     def __init__(self):
         self.text = ""
+        self.flush_count = 0
 
     def write(self, text):
         self.text += text
+
+    def flush(self):
+        self.flush_count += 1
 
 
 class FakeStderr(FakeStdout):
     pass
 
 
-class FakeClient:
+class FakeRuntimeClient:
     def __init__(self, tools=None, result=None, error=None):
         self.tools = tools or []
         self.result = result
         self.error = error
         self.calls = []
 
-    async def list_tools(self, *, timeout, open_browser):
-        self.calls.append(("list_tools", timeout, open_browser))
+    async def list_tools(self, *, timeout):
+        self.calls.append(("list_tools", timeout))
         if self.error:
             raise self.error
         return self.tools
 
-    async def call_tool(self, name, arguments, *, timeout, open_browser):
-        self.calls.append(("call_tool", name, arguments, timeout, open_browser))
+    async def call_tool(self, name, arguments, *, timeout):
+        self.calls.append(("call_tool", name, arguments, timeout))
         if self.error:
             raise self.error
         return self.result
@@ -44,6 +49,7 @@ class FakeClient:
 class FakeBridge:
     def __init__(self):
         self.url = "https://colab.example/connect"
+        self.server = object()
         self.opened = False
         self.waited_timeout = None
         self.exited = False
@@ -63,6 +69,35 @@ class FakeBridge:
 
 async def interrupting_sleep(seconds):
     raise KeyboardInterrupt
+
+
+class FakeMcpClient:
+    def __init__(self, transport):
+        self.transport = transport
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class FakeRuntimeServer:
+    instances = []
+
+    def __init__(self, mcp_client):
+        self.mcp_client = mcp_client
+        self.host = "127.0.0.1"
+        self.port = 9876
+        self.started = False
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    async def start(self):
+        self.started = True
+
+    async def close(self):
+        self.closed = True
 
 
 def test_console_script_points_to_cli_main():
@@ -159,18 +194,18 @@ async def test_tools_command_prints_json():
         description="Run a cell",
         inputSchema={"type": "object"},
     )
-    client = FakeClient(tools=[tool])
+    client = FakeRuntimeClient(tools=[tool])
 
     code = await cli.run_async(
         ["tools", "--json", "--timeout", "3"],
-        client_factory=lambda: client,
+        runtime_client_factory=lambda: client,
         stdout=stdout,
         stderr=stderr,
     )
 
     assert code == 0
     assert '"name": "run_cell"' in stdout.text
-    assert client.calls == [("list_tools", 3.0, True)]
+    assert client.calls == [("list_tools", 3.0)]
     assert stderr.text == ""
 
 
@@ -179,11 +214,11 @@ async def test_tools_command_prints_table():
     stdout = FakeStdout()
     stderr = FakeStderr()
     tool = SimpleNamespace(name="run_cell", description="Run a cell")
-    client = FakeClient(tools=[tool])
+    client = FakeRuntimeClient(tools=[tool])
 
     code = await cli.run_async(
         ["tools"],
-        client_factory=lambda: client,
+        runtime_client_factory=lambda: client,
         stdout=stdout,
         stderr=stderr,
     )
@@ -198,10 +233,13 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt():
     stdout = FakeStdout()
     stderr = FakeStderr()
     bridge = FakeBridge()
+    FakeRuntimeServer.instances.clear()
 
     code = await cli.run_async(
         ["connect", "--timeout", "4"],
         bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
         sleep=interrupting_sleep,
         stdout=stdout,
         stderr=stderr,
@@ -211,7 +249,10 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt():
     assert bridge.opened is True
     assert bridge.waited_timeout == 4
     assert bridge.exited is True
+    assert FakeRuntimeServer.instances[0].started is True
+    assert FakeRuntimeServer.instances[0].closed is True
     assert "https://colab.example/connect" in stdout.text
+    assert stdout.flush_count >= 3
 
 
 @pytest.mark.asyncio
@@ -219,31 +260,29 @@ async def test_call_command_prints_json_result():
     stdout = FakeStdout()
     stderr = FakeStderr()
     result = SimpleNamespace(structured_content={"ok": True})
-    client = FakeClient(result=result)
+    client = FakeRuntimeClient(result=result)
 
     code = await cli.run_async(
         ["call", "run_cell", "--json", '{"code":"print(1)"}'],
-        client_factory=lambda: client,
+        runtime_client_factory=lambda: client,
         stdout=stdout,
         stderr=stderr,
     )
 
     assert code == 0
     assert '"ok": true' in stdout.text
-    assert client.calls == [
-        ("call_tool", "run_cell", {"code": "print(1)"}, 60.0, True)
-    ]
+    assert client.calls == [("call_tool", "run_cell", {"code": "print(1)"}, 60.0)]
 
 
 @pytest.mark.asyncio
 async def test_usage_error_returns_code_2():
     stdout = FakeStdout()
     stderr = FakeStderr()
-    client = FakeClient()
+    client = FakeRuntimeClient()
 
     code = await cli.run_async(
         ["call", "run_cell", "--json", "[1]"],
-        client_factory=lambda: client,
+        runtime_client_factory=lambda: client,
         stdout=stdout,
         stderr=stderr,
     )
@@ -257,11 +296,11 @@ async def test_connection_timeout_returns_code_1():
     stdout = FakeStdout()
     stderr = FakeStderr()
     error = ColabConnectionTimeoutError("https://example.invalid", 1)
-    client = FakeClient(error=error)
+    client = FakeRuntimeClient(error=error)
 
     code = await cli.run_async(
         ["tools", "--timeout", "1"],
-        client_factory=lambda: client,
+        runtime_client_factory=lambda: client,
         stdout=stdout,
         stderr=stderr,
     )
@@ -269,3 +308,20 @@ async def test_connection_timeout_returns_code_1():
     assert code == 1
     assert "Timed out" in stderr.text
     assert "https://example.invalid" in stderr.text
+
+
+@pytest.mark.asyncio
+async def test_missing_runtime_server_returns_code_1():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    client = FakeRuntimeClient(error=RuntimeServerError("Start colab-cli connect"))
+
+    code = await cli.run_async(
+        ["tools", "--timeout", "1"],
+        runtime_client_factory=lambda: client,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 1
+    assert "Start colab-cli connect" in stderr.text

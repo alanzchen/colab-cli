@@ -1,12 +1,20 @@
 import argparse
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, is_dataclass
+from collections.abc import Callable, Sequence
 import json
 import sys
 from typing import Any, TextIO
 
 from colab_cli.bridge import ColabBridge, ColabConnectionTimeoutError
+from colab_cli.json_util import to_jsonable
+from colab_cli.runtime import (
+    RuntimeClient,
+    RuntimeServer,
+    RuntimeServerError,
+    RuntimeState,
+    clear_state,
+    write_state,
+)
 
 
 class CliUsageError(ValueError):
@@ -58,24 +66,6 @@ def parse_json_object(value: str) -> dict[str, Any]:
     return parsed
 
 
-def to_jsonable(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return to_jsonable(value.model_dump(mode="json"))
-    if is_dataclass(value):
-        return to_jsonable(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [to_jsonable(item) for item in value]
-    if hasattr(value, "__dict__"):
-        return {
-            key: to_jsonable(item)
-            for key, item in vars(value).items()
-            if not key.startswith("_")
-        }
-    return value
-
-
 def tool_to_row(tool: Any) -> tuple[str, str]:
     name = getattr(tool, "name", "")
     description = getattr(tool, "description", "") or ""
@@ -93,29 +83,58 @@ def print_tools_table(tools: Sequence[Any], stdout: TextIO) -> None:
         stdout.write(f"{name.ljust(name_width)}  {description}\n")
 
 
+def write_status(stdout: TextIO, text: str) -> None:
+    stdout.write(text)
+    stdout.flush()
+
+
 async def run_connect(
     args: argparse.Namespace,
     stdout: TextIO,
     bridge_factory: Callable[[], ColabBridge],
+    mcp_client_factory: Callable[[Any], Any],
+    runtime_server_factory: Callable[[Any], RuntimeServer],
     sleep: Callable[[float], Any],
+    state_file: Any = None,
 ) -> int:
     async with bridge_factory() as bridge:
         if not args.no_open:
             bridge.open_browser()
-        stdout.write(f"Colab URL: {bridge.url}\n")
-        stdout.write("Waiting for Colab browser connection...\n")
+        write_status(stdout, f"Colab URL: {bridge.url}\n")
+        write_status(stdout, "Waiting for Colab browser connection...\n")
         await bridge.wait_for_connection(args.timeout)
-        stdout.write("Connected. Press Ctrl+C to stop the bridge.\n")
-        while True:
-            await sleep(3600)
+        from colab_cli.transport import ColabTransport
+
+        async with mcp_client_factory(ColabTransport(bridge.server)) as mcp_client:
+            runtime_server = runtime_server_factory(mcp_client)
+            await runtime_server.start()
+            write_state(
+                RuntimeState(host=runtime_server.host, port=runtime_server.port),
+                state_file,
+            )
+            write_status(stdout, "Connected. Press Ctrl+C to stop the bridge.\n")
+            write_status(
+                stdout,
+                "Local control server: "
+                f"{runtime_server.host}:{runtime_server.port}\n",
+            )
+            try:
+                while True:
+                    await sleep(3600)
+            finally:
+                clear_state(state_file)
+                await runtime_server.close()
 
 
 async def run_async(
     argv: Sequence[str] | None = None,
     *,
-    client_factory: Callable[[], Any] | None = None,
+    runtime_client_factory: Callable[[], Any] | None = None,
     bridge_factory: Callable[[], ColabBridge] = ColabBridge,
+    mcp_client_factory: Callable[[Any], Any] | None = None,
+    runtime_server_factory: Callable[[Any], RuntimeServer] = RuntimeServer,
     sleep: Callable[[float], Any] = asyncio.sleep,
+    state_file: Any = None,
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
 ) -> int:
@@ -123,20 +142,28 @@ async def run_async(
     args = parser.parse_args(argv)
 
     try:
+        if mcp_client_factory is None:
+            from fastmcp import Client
+
+            mcp_client_factory = Client
+
         if args.command == "connect":
-            return await run_connect(args, stdout, bridge_factory, sleep)
-
-        if client_factory is None:
-            from colab_cli.client import ColabCliClient
-
-            client_factory = ColabCliClient
-
-        client = client_factory()
-        if args.command == "tools":
-            tools = await client.list_tools(
-                timeout=args.timeout,
-                open_browser=not args.no_open,
+            return await run_connect(
+                args,
+                stdout,
+                bridge_factory,
+                mcp_client_factory,
+                runtime_server_factory,
+                sleep,
+                state_file,
             )
+
+        if runtime_client_factory is None:
+            runtime_client_factory = RuntimeClient
+
+        if args.command == "tools":
+            client = runtime_client_factory()
+            tools = await client.list_tools(timeout=args.timeout)
             if args.output_json:
                 stdout.write(json.dumps(to_jsonable(tools), indent=2) + "\n")
             else:
@@ -145,11 +172,11 @@ async def run_async(
 
         if args.command == "call":
             arguments = parse_json_object(args.json)
+            client = runtime_client_factory()
             result = await client.call_tool(
                 args.tool_name,
                 arguments,
                 timeout=args.timeout,
-                open_browser=not args.no_open,
             )
             stdout.write(json.dumps(to_jsonable(result), indent=2) + "\n")
             return 0
@@ -159,6 +186,9 @@ async def run_async(
         stderr.write(f"{exc}\n")
         return 2
     except ColabConnectionTimeoutError as exc:
+        stderr.write(f"{exc}\n")
+        return 1
+    except RuntimeServerError as exc:
         stderr.write(f"{exc}\n")
         return 1
     except KeyboardInterrupt:

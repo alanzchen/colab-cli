@@ -19,6 +19,9 @@ Open a Colab scratch notebook and keep the local bridge running:
 uv run colab-cli connect
 ```
 
+Leave this process running. It owns the WebSocket connection to the Colab tab
+and publishes a local control server for the other commands.
+
 List tools exposed by the connected Colab session:
 
 ```bash
@@ -32,14 +35,16 @@ Call one exposed tool by name with JSON arguments:
 uv run colab-cli call run_cell --json '{"code": "print(1)"}'
 ```
 
-Use `--timeout SECONDS` on any command that waits for Colab. Use `--no-open`
-when you want to copy the printed Colab URL into a browser yourself.
+Use `--timeout SECONDS` on commands that wait on a connection or runtime
+response. Use `colab-cli connect --no-open` when you want to copy the printed
+Colab URL into a browser yourself.
 
 ## Manual Smoke Test
 
-1. Run `uv run colab-cli tools --timeout 60`.
+1. In terminal 1, run `uv run colab-cli connect --timeout 60`.
 2. Allow the command to open the Colab scratch notebook.
 3. Wait for Colab to connect to the local bridge.
-4. Confirm the terminal prints the discovered tool list.
+4. In terminal 2, run `uv run colab-cli tools --timeout 10`.
+5. Confirm the terminal prints the discovered tool list.
 
 Full end-to-end testing requires a real browser session in Google Colab.
