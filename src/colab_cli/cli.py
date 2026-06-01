@@ -1,6 +1,6 @@
 import argparse
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import json
 import sys
 from typing import Any, TextIO
@@ -67,8 +67,12 @@ def parse_json_object(value: str) -> dict[str, Any]:
 
 
 def tool_to_row(tool: Any) -> tuple[str, str]:
-    name = getattr(tool, "name", "")
-    description = getattr(tool, "description", "") or ""
+    if isinstance(tool, Mapping):
+        name = tool.get("name", "")
+        description = tool.get("description", "") or ""
+    else:
+        name = getattr(tool, "name", "")
+        description = getattr(tool, "description", "") or ""
     return str(name), str(description)
 
 

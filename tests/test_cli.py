@@ -185,6 +185,12 @@ def test_to_jsonable_recurses_into_dataclass_result():
     }
 
 
+def test_tool_to_row_reads_dict_tools_returned_by_runtime():
+    tool = {"name": "get_cells", "description": "Gets notebook cells"}
+
+    assert cli.tool_to_row(tool) == ("get_cells", "Gets notebook cells")
+
+
 @pytest.mark.asyncio
 async def test_tools_command_prints_json():
     stdout = FakeStdout()
