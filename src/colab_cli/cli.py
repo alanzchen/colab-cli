@@ -195,7 +195,7 @@ async def run_async(
     except RuntimeServerError as exc:
         stderr.write(f"{exc}\n")
         return 1
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
     except Exception as exc:
         stderr.write(f"{type(exc).__name__}: {exc}\n")

@@ -1,3 +1,4 @@
+import asyncio
 import importlib.metadata
 from types import SimpleNamespace
 
@@ -69,6 +70,10 @@ class FakeBridge:
 
 async def interrupting_sleep(seconds):
     raise KeyboardInterrupt
+
+
+async def cancelled_sleep(seconds):
+    raise asyncio.CancelledError
 
 
 class FakeMcpClient:
@@ -261,6 +266,30 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt(tmp_path):
     assert FakeRuntimeServer.instances[0].closed is True
     assert "https://colab.example/connect" in stdout.text
     assert stdout.flush_count >= 3
+    assert not state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_connect_command_exits_130_on_cancelled_sleep(tmp_path):
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
+    FakeRuntimeServer.instances.clear()
+
+    code = await cli.run_async(
+        ["connect", "--timeout", "4"],
+        bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
+        sleep=cancelled_sleep,
+        state_file=state_file,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 130
+    assert FakeRuntimeServer.instances[0].closed is True
     assert not state_file.exists()
 
 
