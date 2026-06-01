@@ -235,10 +235,11 @@ async def test_tools_command_prints_table():
 
 
 @pytest.mark.asyncio
-async def test_connect_command_opens_waits_and_exits_130_on_interrupt():
+async def test_connect_command_opens_waits_and_exits_130_on_interrupt(tmp_path):
     stdout = FakeStdout()
     stderr = FakeStderr()
     bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
     FakeRuntimeServer.instances.clear()
 
     code = await cli.run_async(
@@ -247,6 +248,7 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt():
         mcp_client_factory=FakeMcpClient,
         runtime_server_factory=FakeRuntimeServer,
         sleep=interrupting_sleep,
+        state_file=state_file,
         stdout=stdout,
         stderr=stderr,
     )
@@ -259,6 +261,7 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt():
     assert FakeRuntimeServer.instances[0].closed is True
     assert "https://colab.example/connect" in stdout.text
     assert stdout.flush_count >= 3
+    assert not state_file.exists()
 
 
 @pytest.mark.asyncio
