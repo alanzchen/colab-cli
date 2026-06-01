@@ -60,9 +60,9 @@ def parse_json_object(value: str) -> dict[str, Any]:
 
 def to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
+        return to_jsonable(value.model_dump(mode="json"))
     if is_dataclass(value):
-        return asdict(value)
+        return to_jsonable(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

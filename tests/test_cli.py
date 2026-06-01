@@ -1,6 +1,8 @@
 import importlib.metadata
 from types import SimpleNamespace
 
+from fastmcp.client.client import CallToolResult
+from mcp.types import TextContent
 import pytest
 
 from colab_cli import cli
@@ -100,6 +102,52 @@ def test_to_jsonable_uses_model_dump():
     value = SimpleNamespace(model_dump=lambda mode: {"mode": mode})
 
     assert cli.to_jsonable(value) == {"mode": "json"}
+
+
+def test_to_jsonable_recurses_into_model_dump_result():
+    value = SimpleNamespace(
+        model_dump=lambda mode: {
+            "mode": mode,
+            "content": [TextContent(type="text", text="hello")],
+        }
+    )
+
+    assert cli.to_jsonable(value) == {
+        "mode": "json",
+        "content": [
+            {
+                "type": "text",
+                "text": "hello",
+                "annotations": None,
+                "meta": None,
+            }
+        ],
+    }
+
+
+def test_to_jsonable_recurses_into_dataclass_result():
+    value = CallToolResult(
+        content=[TextContent(type="text", text='{"ok": true}')],
+        structured_content={"ok": True},
+        meta=None,
+        data={"ok": True},
+        is_error=False,
+    )
+
+    assert cli.to_jsonable(value) == {
+        "content": [
+            {
+                "type": "text",
+                "text": '{"ok": true}',
+                "annotations": None,
+                "meta": None,
+            }
+        ],
+        "structured_content": {"ok": True},
+        "meta": None,
+        "data": {"ok": True},
+        "is_error": False,
+    }
 
 
 @pytest.mark.asyncio
