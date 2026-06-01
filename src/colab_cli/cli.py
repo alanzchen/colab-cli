@@ -7,7 +7,6 @@ import sys
 from typing import Any, TextIO
 
 from colab_cli.bridge import ColabBridge, ColabConnectionTimeoutError
-from colab_cli.client import ColabCliClient
 
 
 class CliUsageError(ValueError):
@@ -114,7 +113,7 @@ async def run_connect(
 async def run_async(
     argv: Sequence[str] | None = None,
     *,
-    client_factory: Callable[[], ColabCliClient] = ColabCliClient,
+    client_factory: Callable[[], Any] | None = None,
     bridge_factory: Callable[[], ColabBridge] = ColabBridge,
     sleep: Callable[[float], Any] = asyncio.sleep,
     stdout: TextIO = sys.stdout,
@@ -126,6 +125,11 @@ async def run_async(
     try:
         if args.command == "connect":
             return await run_connect(args, stdout, bridge_factory, sleep)
+
+        if client_factory is None:
+            from colab_cli.client import ColabCliClient
+
+            client_factory = ColabCliClient
 
         client = client_factory()
         if args.command == "tools":
