@@ -22,6 +22,20 @@ uv run colab-cli connect
 Leave this process running. It owns the WebSocket connection to the Colab tab
 and publishes a local control server for the other commands.
 
+Inspect or stop the running bridge from another terminal:
+
+```bash
+uv run colab-cli status
+uv run colab-cli status --json
+uv run colab-cli stop
+```
+
+Start a fresh bridge intentionally, stopping a reachable existing bridge first:
+
+```bash
+uv run colab-cli connect --replace
+```
+
 List tools exposed by the connected Colab session:
 
 ```bash
@@ -37,14 +51,19 @@ uv run colab-cli call run_cell --json '{"code": "print(1)"}'
 
 Use `--timeout SECONDS` on commands that wait on a connection or runtime
 response. Use `colab-cli connect --no-open` when you want to copy the printed
-Colab URL into a browser yourself.
+Colab URL into a browser yourself. Use `colab-cli stop` when the bridge was
+started in another terminal and you want it to shut down cleanly.
 
 ## Manual Smoke Test
 
 1. In terminal 1, run `uv run colab-cli connect --timeout 60`.
 2. Allow the command to open the Colab scratch notebook.
 3. Wait for Colab to connect to the local bridge.
-4. In terminal 2, run `uv run colab-cli tools --timeout 10`.
-5. Confirm the terminal prints the discovered tool list.
+4. In terminal 2, run `uv run colab-cli status`.
+5. Confirm the terminal reports the bridge as running.
+6. Run `uv run colab-cli tools --timeout 10`.
+7. Confirm the terminal prints the discovered tool list.
+8. Run `uv run colab-cli stop`.
+9. Confirm terminal 1 exits without a traceback.
 
 Full end-to-end testing requires a real browser session in Google Colab.
