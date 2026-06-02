@@ -95,6 +95,57 @@ async def test_runtime_client_calls_tool_from_server(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_reports_status_from_server(tmp_path):
+    state_file = tmp_path / "server.json"
+    server = RuntimeServer(FakeMcpClient())
+    await server.start()
+    write_state(RuntimeState(host=server.host, port=server.port), state_file)
+
+    try:
+        status = await RuntimeClient(state_file=state_file).status(timeout=1)
+    finally:
+        await server.close()
+
+    assert status == {
+        "state": "running",
+        "reachable": True,
+        "host": server.host,
+        "port": server.port,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_requests_server_shutdown(tmp_path):
+    state_file = tmp_path / "server.json"
+    server = RuntimeServer(FakeMcpClient())
+    await server.start()
+    write_state(RuntimeState(host=server.host, port=server.port), state_file)
+
+    try:
+        result = await RuntimeClient(state_file=state_file).shutdown(timeout=1)
+    finally:
+        await server.close()
+
+    assert result == {"stopping": True}
+    assert server.shutdown_requested is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_reports_stale_status(tmp_path):
+    state_file = tmp_path / "server.json"
+    write_state(RuntimeState(host="127.0.0.1", port=9), state_file)
+
+    status = await RuntimeClient(state_file=state_file).status(timeout=0.1)
+
+    assert status == {
+        "state": "stale",
+        "reachable": False,
+        "host": "127.0.0.1",
+        "port": 9,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_reports_missing_connect_process(tmp_path):
     state_file = tmp_path / "missing.json"
 

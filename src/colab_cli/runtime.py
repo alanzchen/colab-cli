@@ -12,6 +12,10 @@ class RuntimeServerError(RuntimeError):
     pass
 
 
+class RuntimeConnectionError(RuntimeServerError):
+    pass
+
+
 @dataclass(frozen=True)
 class RuntimeState:
     host: str
@@ -51,6 +55,17 @@ class RuntimeServer:
         self.host = host
         self.port = 0
         self._server: asyncio.Server | None = None
+        self._shutdown_event = asyncio.Event()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_event.is_set()
+
+    def request_shutdown(self) -> None:
+        self._shutdown_event.set()
+
+    async def wait_for_shutdown(self) -> None:
+        await self._shutdown_event.wait()
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_client, self.host, 0)
@@ -92,6 +107,16 @@ class RuntimeServer:
 
     async def _dispatch(self, request: dict[str, Any]) -> Any:
         method = request.get("method")
+        if method == "status":
+            return {
+                "state": "running",
+                "reachable": True,
+                "host": self.host,
+                "port": self.port,
+            }
+        if method == "shutdown":
+            self.request_shutdown()
+            return {"stopping": True}
         if method == "list_tools":
             return await self._mcp_client.list_tools()
         if method == "call_tool":
@@ -115,15 +140,66 @@ class RuntimeClient:
             timeout=timeout,
         )
 
+    async def status(self, *, timeout: float) -> dict[str, Any]:
+        try:
+            state = read_state(self._state_file)
+        except RuntimeServerError:
+            return {"state": "missing", "reachable": False}
+
+        try:
+            return await self._request_to_state(
+                state,
+                {"method": "status"},
+                timeout=timeout,
+            )
+        except RuntimeConnectionError:
+            return {
+                "state": "stale",
+                "reachable": False,
+                "host": state.host,
+                "port": state.port,
+            }
+
+    async def shutdown(self, *, timeout: float) -> dict[str, Any]:
+        try:
+            state = read_state(self._state_file)
+        except RuntimeServerError:
+            return {"stopping": False, "state": "missing", "reachable": False}
+
+        try:
+            return await self._request_to_state(
+                state,
+                {"method": "shutdown"},
+                timeout=timeout,
+            )
+        except RuntimeConnectionError:
+            clear_state(self._state_file)
+            return {
+                "stopping": False,
+                "state": "stale",
+                "reachable": False,
+                "host": state.host,
+                "port": state.port,
+            }
+
     async def _request(self, payload: dict[str, Any], *, timeout: float) -> Any:
         state = read_state(self._state_file)
+        return await self._request_to_state(state, payload, timeout=timeout)
+
+    async def _request_to_state(
+        self,
+        state: RuntimeState,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> Any:
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(state.host, state.port),
                 timeout=timeout,
             )
         except OSError as exc:
-            raise RuntimeServerError(
+            raise RuntimeConnectionError(
                 "No running colab-cli connect process is reachable. Start one with "
                 "`colab-cli connect`."
             ) from exc
