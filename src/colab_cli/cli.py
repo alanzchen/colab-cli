@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     connect.add_argument("--timeout", type=float, default=60.0)
     connect.add_argument("--no-open", action="store_true")
+    connect.add_argument("--replace", action="store_true")
 
     tools = subparsers.add_parser(
         "tools",
@@ -52,6 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     call.add_argument("--timeout", type=float, default=60.0)
     call.add_argument("--no-open", action="store_true")
+
+    status = subparsers.add_parser(
+        "status",
+        help="Show bridge runtime status.",
+    )
+    status.add_argument("--timeout", type=float, default=5.0)
+    status.add_argument("--json", dest="output_json", action="store_true")
+
+    stop = subparsers.add_parser(
+        "stop",
+        help="Stop the running bridge.",
+    )
+    stop.add_argument("--timeout", type=float, default=5.0)
 
     return parser
 
@@ -90,6 +104,37 @@ def print_tools_table(tools: Sequence[Any], stdout: TextIO) -> None:
 def write_status(stdout: TextIO, text: str) -> None:
     stdout.write(text)
     stdout.flush()
+
+
+def print_runtime_status(status: Mapping[str, Any], stdout: TextIO) -> None:
+    state = status.get("state")
+    if state == "running":
+        stdout.write(
+            "Bridge running at "
+            f"{status.get('host')}:{status.get('port')}.\n"
+        )
+        return
+    if state == "stale":
+        stdout.write(
+            "Bridge state is stale for "
+            f"{status.get('host')}:{status.get('port')}; "
+            "no runtime server is reachable.\n"
+        )
+        return
+    stdout.write("No bridge is running.\n")
+
+
+def print_stop_result(result: Mapping[str, Any], stdout: TextIO) -> None:
+    if result.get("stopping"):
+        stdout.write("Stopping bridge...\n")
+        return
+    if result.get("state") == "stale":
+        stdout.write(
+            "Cleared stale bridge state for "
+            f"{result.get('host')}:{result.get('port')}.\n"
+        )
+        return
+    stdout.write("No bridge is running.\n")
 
 
 async def run_connect(
@@ -146,12 +191,12 @@ async def run_async(
     args = parser.parse_args(argv)
 
     try:
-        if mcp_client_factory is None:
-            from fastmcp import Client
-
-            mcp_client_factory = Client
-
         if args.command == "connect":
+            if mcp_client_factory is None:
+                from fastmcp import Client
+
+                mcp_client_factory = Client
+
             return await run_connect(
                 args,
                 stdout,
@@ -164,6 +209,21 @@ async def run_async(
 
         if runtime_client_factory is None:
             runtime_client_factory = RuntimeClient
+
+        if args.command == "status":
+            client = runtime_client_factory()
+            status = await client.status(timeout=args.timeout)
+            if args.output_json:
+                stdout.write(json.dumps(to_jsonable(status), indent=2) + "\n")
+            else:
+                print_runtime_status(status, stdout)
+            return 0
+
+        if args.command == "stop":
+            client = runtime_client_factory()
+            result = await client.shutdown(timeout=args.timeout)
+            print_stop_result(result, stdout)
+            return 0
 
         if args.command == "tools":
             client = runtime_client_factory()

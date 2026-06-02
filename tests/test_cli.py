@@ -28,9 +28,18 @@ class FakeStderr(FakeStdout):
 
 
 class FakeRuntimeClient:
-    def __init__(self, tools=None, result=None, error=None):
+    def __init__(
+        self,
+        tools=None,
+        result=None,
+        status_result=None,
+        shutdown_result=None,
+        error=None,
+    ):
         self.tools = tools or []
         self.result = result
+        self.status_result = status_result
+        self.shutdown_result = shutdown_result
         self.error = error
         self.calls = []
 
@@ -45,6 +54,18 @@ class FakeRuntimeClient:
         if self.error:
             raise self.error
         return self.result
+
+    async def status(self, *, timeout):
+        self.calls.append(("status", timeout))
+        if self.error:
+            raise self.error
+        return self.status_result
+
+    async def shutdown(self, *, timeout):
+        self.calls.append(("shutdown", timeout))
+        if self.error:
+            raise self.error
+        return self.shutdown_result
 
 
 class FakeBridge:
@@ -126,6 +147,20 @@ def test_parser_accepts_core_commands():
     assert tools.output_json is True
     assert call.command == "call"
     assert call.tool_name == "run_cell"
+
+
+def test_parser_accepts_lifecycle_commands():
+    parser = cli.build_parser()
+
+    status = parser.parse_args(["status", "--json"])
+    stop = parser.parse_args(["stop"])
+    replace = parser.parse_args(["connect", "--replace"])
+
+    assert status.command == "status"
+    assert status.output_json is True
+    assert stop.command == "stop"
+    assert replace.command == "connect"
+    assert replace.replace is True
 
 
 def test_parse_json_object_rejects_invalid_json():
@@ -237,6 +272,73 @@ async def test_tools_command_prints_table():
     assert code == 0
     assert "run_cell" in stdout.text
     assert "Run a cell" in stdout.text
+
+
+@pytest.mark.asyncio
+async def test_status_command_prints_running_status():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    client = FakeRuntimeClient(
+        status_result={
+            "state": "running",
+            "reachable": True,
+            "host": "127.0.0.1",
+            "port": 1234,
+        }
+    )
+
+    code = await cli.run_async(
+        ["status"],
+        runtime_client_factory=lambda: client,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "running" in stdout.text
+    assert "127.0.0.1:1234" in stdout.text
+    assert client.calls == [("status", 5.0)]
+    assert stderr.text == ""
+
+
+@pytest.mark.asyncio
+async def test_status_command_prints_json():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    client = FakeRuntimeClient(
+        status_result={"state": "missing", "reachable": False}
+    )
+
+    code = await cli.run_async(
+        ["status", "--json"],
+        runtime_client_factory=lambda: client,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert '"state": "missing"' in stdout.text
+    assert '"reachable": false' in stdout.text
+    assert client.calls == [("status", 5.0)]
+
+
+@pytest.mark.asyncio
+async def test_stop_command_requests_shutdown():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    client = FakeRuntimeClient(shutdown_result={"stopping": True})
+
+    code = await cli.run_async(
+        ["stop"],
+        runtime_client_factory=lambda: client,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "Stopping" in stdout.text
+    assert client.calls == [("shutdown", 5.0)]
+    assert stderr.text == ""
 
 
 @pytest.mark.asyncio
