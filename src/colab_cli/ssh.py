@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import os
@@ -180,3 +180,115 @@ def write_ssh_config(
         updated = existing.rstrip() + "\n\n" + block if existing.strip() else block
 
     config_path.write_text(updated, encoding="utf-8")
+
+
+def _cell_count(cells_result: Any) -> int:
+    if isinstance(cells_result, Mapping):
+        structured = cells_result.get("structured_content")
+        if isinstance(structured, Mapping):
+            cells = structured.get("cells")
+            if isinstance(cells, list):
+                return len(cells)
+        data = cells_result.get("data")
+        if isinstance(data, Mapping):
+            cells = data.get("cells")
+            if isinstance(cells, list):
+                return len(cells)
+    return 0
+
+
+def _new_cell_id(add_result: Any) -> str:
+    if isinstance(add_result, Mapping):
+        for key in ("structured_content", "data"):
+            value = add_result.get(key)
+            if isinstance(value, Mapping) and value.get("newCellId"):
+                return str(value["newCellId"])
+    raise ColabSshError("Colab did not return a new setup cell id")
+
+
+class ColabSshManager:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        alias: str = DEFAULT_ALIAS,
+        workspace: str = DEFAULT_WORKSPACE,
+        bootstrap_url: str | None = None,
+        key_path: Path | None = None,
+        config_path: Path | None = None,
+        known_hosts_path: Path | None = None,
+        cloudflared_path: str | None = None,
+        subprocess_run: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    ):
+        self.client = client
+        self.alias = alias
+        self.workspace = workspace
+        self.bootstrap_url = bootstrap_url or default_bootstrap_url()
+        self.key_path = key_path or default_key_path()
+        self.config_path = config_path or default_config_path()
+        self.known_hosts_path = known_hosts_path or default_known_hosts_path()
+        self.cloudflared_path = cloudflared_path
+        self.subprocess_run = subprocess_run
+        self.last_setup_info: SshSetupInfo | None = None
+
+    async def setup(self, *, timeout: float, setup_timeout: float) -> SshSetupInfo:
+        cloudflared_path = self.cloudflared_path or find_cloudflared()
+        public_key = ensure_keypair(
+            self.key_path,
+            subprocess_run=self.subprocess_run,
+        )
+        setup_code = build_setup_cell(
+            bootstrap_url=self.bootstrap_url,
+            public_key=public_key,
+            workspace=self.workspace,
+        )
+        cells_result = await self.client.call_tool("get_cells", {}, timeout=timeout)
+        add_result = await self.client.call_tool(
+            "add_code_cell",
+            {
+                "cellIndex": _cell_count(cells_result),
+                "language": "python",
+                "code": setup_code,
+            },
+            timeout=timeout,
+        )
+        cell_id = _new_cell_id(add_result)
+        run_result = await self.client.call_tool(
+            "run_code_cell",
+            {"cellId": cell_id},
+            timeout=setup_timeout,
+        )
+        payload = parse_setup_result(run_result)
+        info = SshSetupInfo(
+            alias=self.alias,
+            hostname=str(payload["hostname"]),
+            user=str(payload.get("user", "root")),
+            workspace=str(payload.get("workspace", self.workspace)),
+        )
+        write_ssh_config(
+            config_path=self.config_path,
+            alias=self.alias,
+            hostname=info.hostname,
+            identity_file=self.key_path,
+            cloudflared_path=cloudflared_path,
+            known_hosts_file=self.known_hosts_path,
+        )
+        self.last_setup_info = info
+        return info
+
+    def connect(self, ssh_args: Sequence[str]) -> int:
+        completed = self.subprocess_run(["ssh", self.alias, *ssh_args])
+        return int(completed.returncode)
+
+    async def setup_and_maybe_connect(
+        self,
+        *,
+        setup_only: bool,
+        ssh_args: Sequence[str],
+        timeout: float,
+        setup_timeout: float,
+    ) -> int:
+        await self.setup(timeout=timeout, setup_timeout=setup_timeout)
+        if setup_only:
+            return 0
+        return self.connect(ssh_args)

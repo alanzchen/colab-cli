@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 import json
+from pathlib import Path
 import sys
 from typing import Any, TextIO
 
@@ -66,6 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop the running bridge.",
     )
     stop.add_argument("--timeout", type=float, default=5.0)
+
+    ssh = subparsers.add_parser(
+        "ssh",
+        help="Set up SSH in the connected Colab session and connect.",
+    )
+    ssh.add_argument("--timeout", type=float, default=60.0)
+    ssh.add_argument("--setup-timeout", type=float, default=300.0)
+    ssh.add_argument("--setup-only", action="store_true")
+    ssh.add_argument("--alias", default="colab-ssh")
+    ssh.add_argument("--workspace", default="/content/workspace")
+    ssh.add_argument("--bootstrap-url")
+    ssh.add_argument("--key-path")
+    ssh.add_argument("--config-path")
+    ssh.add_argument("--known-hosts")
+    ssh.add_argument("--cloudflared-path")
+    ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
 
     return parser
 
@@ -179,6 +196,7 @@ async def run_async(
     argv: Sequence[str] | None = None,
     *,
     runtime_client_factory: Callable[[], Any] | None = None,
+    ssh_manager_factory: Callable[..., Any] | None = None,
     bridge_factory: Callable[[], ColabBridge] = ColabBridge,
     mcp_client_factory: Callable[[Any], Any] | None = None,
     runtime_server_factory: Callable[[Any], RuntimeServer] = RuntimeServer,
@@ -230,6 +248,41 @@ async def run_async(
             result = await client.shutdown(timeout=args.timeout)
             print_stop_result(result, stdout)
             return 0
+
+        if args.command == "ssh":
+            if ssh_manager_factory is None:
+                from colab_cli.ssh import ColabSshManager
+
+                ssh_manager_factory = ColabSshManager
+
+            client = runtime_client_factory()
+            manager = ssh_manager_factory(
+                client=client,
+                alias=args.alias,
+                workspace=args.workspace,
+                bootstrap_url=args.bootstrap_url,
+                key_path=Path(args.key_path).expanduser()
+                if args.key_path
+                else None,
+                config_path=Path(args.config_path).expanduser()
+                if args.config_path
+                else None,
+                known_hosts_path=Path(args.known_hosts).expanduser()
+                if args.known_hosts
+                else None,
+                cloudflared_path=args.cloudflared_path,
+            )
+            ssh_args = list(args.ssh_args)
+            if ssh_args and ssh_args[0] == "--":
+                ssh_args = ssh_args[1:]
+            code = await manager.setup_and_maybe_connect(
+                setup_only=args.setup_only,
+                ssh_args=ssh_args,
+                timeout=args.timeout,
+                setup_timeout=args.setup_timeout,
+            )
+            stdout.write(f"SSH configured. Run: ssh {args.alias}\n")
+            return code
 
         if args.command == "tools":
             client = runtime_client_factory()

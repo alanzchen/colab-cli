@@ -68,6 +68,23 @@ class FakeRuntimeClient:
         return self.shutdown_result
 
 
+class FakeSshManager:
+    def __init__(self, exit_code=0):
+        self.exit_code = exit_code
+        self.calls = []
+
+    async def setup_and_maybe_connect(
+        self,
+        *,
+        setup_only,
+        ssh_args,
+        timeout,
+        setup_timeout,
+    ):
+        self.calls.append((setup_only, ssh_args, timeout, setup_timeout))
+        return self.exit_code
+
+
 class FakeBridge:
     def __init__(self):
         self.url = "https://colab.example/connect"
@@ -173,6 +190,19 @@ def test_parser_accepts_lifecycle_commands():
     assert stop.command == "stop"
     assert replace.command == "connect"
     assert replace.replace is True
+
+
+def test_parser_accepts_ssh_command():
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        ["ssh", "--setup-only", "--alias", "gpu", "--", "whoami"]
+    )
+
+    assert args.command == "ssh"
+    assert args.setup_only is True
+    assert args.alias == "gpu"
+    assert args.ssh_args == ["--", "whoami"]
 
 
 def test_parse_json_object_rejects_invalid_json():
@@ -350,6 +380,45 @@ async def test_stop_command_requests_shutdown():
     assert code == 0
     assert "Stopping" in stdout.text
     assert client.calls == [("shutdown", 5.0)]
+    assert stderr.text == ""
+
+
+@pytest.mark.asyncio
+async def test_ssh_command_prints_setup_info():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    fake = FakeSshManager(exit_code=0)
+
+    code = await cli.run_async(
+        ["ssh", "--setup-only"],
+        ssh_manager_factory=lambda **kwargs: fake,
+        runtime_client_factory=lambda: FakeRuntimeClient(),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "ssh colab-ssh" in stdout.text
+    assert fake.calls == [(True, [], 60.0, 300.0)]
+    assert stderr.text == ""
+
+
+@pytest.mark.asyncio
+async def test_ssh_command_strips_argument_separator_before_connecting():
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    fake = FakeSshManager(exit_code=0)
+
+    code = await cli.run_async(
+        ["ssh", "--", "whoami"],
+        ssh_manager_factory=lambda **kwargs: fake,
+        runtime_client_factory=lambda: FakeRuntimeClient(),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert fake.calls == [(False, ["whoami"], 60.0, 300.0)]
     assert stderr.text == ""
 
 

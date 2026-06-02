@@ -1,6 +1,37 @@
 from pathlib import Path
+from subprocess import CompletedProcess
 
 from colab_cli import ssh
+
+
+class FakeRuntimeClient:
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, name, arguments, *, timeout):
+        self.calls.append((name, arguments, timeout))
+        if name == "get_cells":
+            return {"structured_content": {"cells": [{"id": "first"}]}}
+        if name == "add_code_cell":
+            return {"structured_content": {"newCellId": "setup-cell"}}
+        if name == "run_code_cell":
+            return {
+                "structured_content": {
+                    "outputs": [
+                        {
+                            "output_type": "stream",
+                            "text": [
+                                (
+                                    'COLAB_CLI_SSH_JSON={"hostname":'
+                                    '"x.trycloudflare.com","user":"root",'
+                                    '"workspace":"/content/work"}\n'
+                                )
+                            ],
+                        }
+                    ]
+                }
+            }
+        raise AssertionError(f"unexpected tool: {name}")
 
 
 def test_default_bootstrap_url_uses_inferred_github_repo(monkeypatch):
@@ -115,3 +146,52 @@ def test_ensure_keypair_reuses_existing_key(tmp_path):
 
     assert public_key == "ssh-ed25519 AAAA test"
     assert calls == []
+
+
+async def test_setup_ssh_calls_colab_tools_and_returns_info(tmp_path):
+    key_path = tmp_path / "key"
+    Path(f"{key_path}.pub").write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+    key_path.write_text("private", encoding="utf-8")
+    client = FakeRuntimeClient()
+    manager = ssh.ColabSshManager(
+        client=client,
+        alias="colab-ssh",
+        workspace="/content/work",
+        bootstrap_url="https://example/setup.py",
+        key_path=key_path,
+        config_path=tmp_path / "config",
+        known_hosts_path=tmp_path / "known_hosts",
+        cloudflared_path="/opt/homebrew/bin/cloudflared",
+        subprocess_run=lambda args, **kwargs: CompletedProcess(args, 0),
+    )
+
+    info = await manager.setup(timeout=7, setup_timeout=11)
+
+    assert client.calls[0] == ("get_cells", {}, 7)
+    assert client.calls[1][0] == "add_code_cell"
+    assert client.calls[1][1]["cellIndex"] == 1
+    assert client.calls[1][1]["language"] == "python"
+    assert "https://example/setup.py" in client.calls[1][1]["code"]
+    assert client.calls[2] == ("run_code_cell", {"cellId": "setup-cell"}, 11)
+    assert info.hostname == "x.trycloudflare.com"
+    assert info.alias == "colab-ssh"
+    assert "x.trycloudflare.com" in (tmp_path / "config").read_text(encoding="utf-8")
+
+
+def test_connect_runs_ssh_alias_with_extra_args(tmp_path):
+    calls = []
+    manager = ssh.ColabSshManager(
+        client=FakeRuntimeClient(),
+        alias="colab-ssh",
+        workspace="/content/work",
+        bootstrap_url="https://example/setup.py",
+        key_path=tmp_path / "key",
+        config_path=tmp_path / "config",
+        known_hosts_path=tmp_path / "known_hosts",
+        cloudflared_path="/opt/homebrew/bin/cloudflared",
+        subprocess_run=lambda args, **kwargs: calls.append(args)
+        or CompletedProcess(args, 23),
+    )
+
+    assert manager.connect(["whoami"]) == 23
+    assert calls == [["ssh", "colab-ssh", "whoami"]]
