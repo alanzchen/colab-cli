@@ -49,6 +49,42 @@ Call one exposed tool by name with JSON arguments:
 uv run colab-cli call run_cell --json '{"code": "print(1)"}'
 ```
 
+Set up SSH in the connected Colab notebook and connect:
+
+```bash
+uv run colab-cli ssh
+```
+
+The `ssh` command creates or reuses `~/.ssh/colab_cli_ed25519`, appends a
+setup cell to the connected notebook, starts OpenSSH and a Cloudflare quick
+tunnel inside Colab, then writes a managed `Host colab-ssh` block to
+`~/.ssh/config`. After setup you can reconnect with:
+
+```bash
+ssh colab-ssh
+```
+
+Use `--setup-only` when you only want to refresh local SSH config:
+
+```bash
+uv run colab-cli ssh --setup-only
+```
+
+Pass SSH arguments after `--`:
+
+```bash
+uv run colab-cli ssh -- -L 8888:localhost:8888
+```
+
+By default the notebook setup cell loads:
+
+```text
+https://raw.githubusercontent.com/alanzchen/colab-cli/main/scripts/colab_ssh_bootstrap.py
+```
+
+Set `COLAB_CLI_SSH_BOOTSTRAP_URL` or pass `--bootstrap-url` to test a fork or a
+temporary copy before the repository is public.
+
 Use `--timeout SECONDS` on commands that wait on a connection or runtime
 response. Use `colab-cli connect --no-open` when you want to copy the printed
 Colab URL into a browser yourself. Use `colab-cli stop` when the bridge was
