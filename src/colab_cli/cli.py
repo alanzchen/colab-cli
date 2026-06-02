@@ -36,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--timeout", type=float, default=60.0)
     connect.add_argument("--no-open", action="store_true")
     connect.add_argument("--replace", action="store_true")
+    connect.add_argument(
+        "--browser-ssh-host",
+        help=(
+            "Print an SSH port-forward command for opening the Colab URL from "
+            "a different machine."
+        ),
+    )
 
     tools = subparsers.add_parser(
         "tools",
@@ -164,9 +171,17 @@ async def run_connect(
     state_file: Any = None,
 ) -> int:
     async with bridge_factory() as bridge:
-        if not args.no_open:
+        if not args.no_open and not args.browser_ssh_host:
             bridge.open_browser()
         write_status(stdout, f"Colab URL: {bridge.url}\n")
+        if args.browser_ssh_host:
+            port = bridge.server.port
+            write_status(
+                stdout,
+                "Browser machine port-forward:\n"
+                f"  ssh -N -L {port}:127.0.0.1:{port} {args.browser_ssh_host}\n"
+                "Open the Colab URL after the forward is running.\n",
+            )
         write_status(stdout, "Waiting for Colab browser connection...\n")
         await bridge.wait_for_connection(args.timeout)
         from colab_cli.transport import ColabTransport

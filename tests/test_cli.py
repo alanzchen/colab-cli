@@ -88,7 +88,7 @@ class FakeSshManager:
 class FakeBridge:
     def __init__(self):
         self.url = "https://colab.example/connect"
-        self.server = object()
+        self.server = SimpleNamespace(port=24680)
         self.opened = False
         self.waited_timeout = None
         self.exited = False
@@ -184,12 +184,16 @@ def test_parser_accepts_lifecycle_commands():
     status = parser.parse_args(["status", "--json"])
     stop = parser.parse_args(["stop"])
     replace = parser.parse_args(["connect", "--replace"])
+    remote_browser = parser.parse_args(
+        ["connect", "--browser-ssh-host", "oracle"]
+    )
 
     assert status.command == "status"
     assert status.output_json is True
     assert stop.command == "stop"
     assert replace.command == "connect"
     assert replace.replace is True
+    assert remote_browser.browser_ssh_host == "oracle"
 
 
 def test_parser_accepts_ssh_command():
@@ -451,6 +455,30 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt(tmp_path):
     assert "https://colab.example/connect" in stdout.text
     assert stdout.flush_count >= 3
     assert not state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_connect_remote_browser_prints_port_forward_and_does_not_open(tmp_path):
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
+    FakeRuntimeServer.reset(wait_error=KeyboardInterrupt)
+
+    code = await cli.run_async(
+        ["connect", "--browser-ssh-host", "oracle", "--timeout", "4"],
+        bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
+        state_file=state_file,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 130
+    assert bridge.opened is False
+    assert "ssh -N -L 24680:127.0.0.1:24680 oracle" in stdout.text
+    assert "Open the Colab URL after the forward is running." in stdout.text
 
 
 @pytest.mark.asyncio

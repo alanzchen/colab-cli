@@ -36,6 +36,18 @@ Start a fresh bridge intentionally, stopping a reachable existing bridge first:
 uv run colab-cli connect --replace
 ```
 
+When `colab-cli` runs on a remote machine but the browser is on your local
+machine, print an SSH port-forward command for the browser-side `localhost`
+bridge:
+
+```bash
+uv run colab-cli connect --browser-ssh-host oracle --timeout 600
+```
+
+Run the printed `ssh -N -L ... oracle` command on the browser machine, then
+open the printed Colab URL. This is needed because Colab connects to
+`localhost:<mcpProxyPort>` from the browser machine.
+
 List tools exposed by the connected Colab session:
 
 ```bash

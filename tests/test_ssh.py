@@ -82,7 +82,7 @@ def test_bootstrap_setup_prints_marker_when_helpers_are_stubbed(
     monkeypatch.setitem(globals_, "ensure_openssh_server", lambda: None)
     monkeypatch.setitem(globals_, "configure_sshd", lambda port: None)
     monkeypatch.setitem(globals_, "install_public_key", lambda public_key: None)
-    monkeypatch.setitem(globals_, "start_sshd", lambda: None)
+    monkeypatch.setitem(globals_, "start_sshd", lambda port: None)
     monkeypatch.setitem(globals_, "ensure_cloudflared", lambda: tmp_path / "cloudflared")
     monkeypatch.setitem(
         globals_,
@@ -100,6 +100,36 @@ def test_bootstrap_setup_prints_marker_when_helpers_are_stubbed(
     assert '"hostname": "x.trycloudflare.com"' in out
     assert '"user": "root"' in out
     assert f'"workspace": "{tmp_path / "workspace"}"' in out
+
+
+def test_bootstrap_setup_uses_same_port_for_sshd_and_tunnel(monkeypatch, tmp_path):
+    namespace = runpy.run_path(str(BOOTSTRAP_SCRIPT))
+    globals_ = namespace["setup"].__globals__
+    calls = []
+
+    monkeypatch.setitem(globals_, "ensure_openssh_server", lambda: None)
+    monkeypatch.setitem(globals_, "configure_sshd", lambda port: None)
+    monkeypatch.setitem(globals_, "install_public_key", lambda public_key: None)
+    monkeypatch.setitem(globals_, "ensure_cloudflared", lambda: tmp_path / "cloudflared")
+    monkeypatch.setitem(
+        globals_,
+        "start_sshd",
+        lambda port: calls.append(("sshd", port)),
+    )
+    monkeypatch.setitem(
+        globals_,
+        "start_cloudflared_tunnel",
+        lambda cloudflared_path, port: calls.append(("tunnel", port))
+        or "x.trycloudflare.com",
+    )
+
+    namespace["setup"](
+        public_key="ssh-ed25519 AAAA test",
+        workspace=str(tmp_path / "workspace"),
+        port=2244,
+    )
+
+    assert calls == [("sshd", 2244), ("tunnel", 2244)]
 
 
 def test_parse_setup_result_extracts_json_marker():

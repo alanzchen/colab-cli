@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import socket
 import subprocess
 import time
 import urllib.request
@@ -13,6 +14,7 @@ SETUP_JSON_PREFIX = "COLAB_CLI_SSH_JSON="
 CLOUDFLARED_DIR = Path("/content/.colab-cli")
 CLOUDFLARED_PID = Path("/tmp/colab_cli_cloudflared.pid")
 CLOUDFLARED_LOG = Path("/tmp/colab_cli_cloudflared.log")
+SSHD_PID = Path("/tmp/colab_cli_sshd.pid")
 SSHD_CONFIG = Path("/etc/ssh/sshd_config")
 SSHD_DROP_IN = Path("/etc/ssh/sshd_config.d/00-colab-cli.conf")
 
@@ -63,6 +65,7 @@ def configure_sshd(port=SSH_PORT):
         "\n".join(
             [
                 f"Port {port}",
+                "ListenAddress 127.0.0.1",
                 "PermitRootLogin yes",
                 "PasswordAuthentication no",
                 "PubkeyAuthentication yes",
@@ -94,16 +97,64 @@ def install_public_key(public_key):
     authorized_keys.chmod(0o600)
 
 
-def start_sshd():
+def _sshd_options(port):
+    return [
+        "-p",
+        str(port),
+        "-o",
+        "ListenAddress=127.0.0.1",
+        "-o",
+        "PermitRootLogin=yes",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "PubkeyAuthentication=yes",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "ChallengeResponseAuthentication=no",
+        "-o",
+        "AuthorizedKeysFile=/root/.ssh/authorized_keys",
+        "-o",
+        f"PidFile={SSHD_PID}",
+    ]
+
+
+def _stop_existing_sshd(port):
+    if SSHD_PID.exists():
+        try:
+            pid = int(SSHD_PID.read_text(encoding="utf-8").strip())
+        except ValueError:
+            SSHD_PID.unlink(missing_ok=True)
+        else:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+            SSHD_PID.unlink(missing_ok=True)
+    subprocess.run(["pkill", "-f", f"sshd.*-p {port}"], check=False)
+
+
+def _wait_for_sshd(port, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.2)
+    raise RuntimeError(f"sshd did not start on 127.0.0.1:{port}")
+
+
+def start_sshd(port=SSH_PORT):
     Path("/run/sshd").mkdir(parents=True, exist_ok=True)
     Path("/var/run/sshd").mkdir(parents=True, exist_ok=True)
     run(["ssh-keygen", "-A"])
-    run(["/usr/sbin/sshd", "-t"])
-    restarted = subprocess.run(["service", "ssh", "restart"], text=True)
-    if restarted.returncode == 0:
-        return
-    subprocess.run(["pkill", "-x", "sshd"], check=False)
-    run(["/usr/sbin/sshd"])
+    _stop_existing_sshd(port)
+    options = _sshd_options(port)
+    run(["/usr/sbin/sshd", "-t", *options])
+    run(["/usr/sbin/sshd", *options])
+    _wait_for_sshd(port)
 
 
 def _cloudflared_asset_name():
@@ -212,7 +263,7 @@ def setup(public_key, workspace="/content/workspace", port=SSH_PORT):
     ensure_openssh_server()
     configure_sshd(port)
     install_public_key(public_key)
-    start_sshd()
+    start_sshd(port)
     cloudflared_path = ensure_cloudflared()
     hostname = start_cloudflared_tunnel(cloudflared_path, port)
 
