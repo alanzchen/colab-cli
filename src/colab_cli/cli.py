@@ -168,11 +168,11 @@ async def run_connect(
                 f"{runtime_server.host}:{runtime_server.port}\n",
             )
             try:
-                while True:
-                    await sleep(3600)
+                await runtime_server.wait_for_shutdown()
             finally:
                 clear_state(state_file)
                 await runtime_server.close()
+    return 0
 
 
 async def run_async(
@@ -192,6 +192,12 @@ async def run_async(
 
     try:
         if args.command == "connect":
+            if args.replace:
+                if runtime_client_factory is None:
+                    runtime_client_factory = RuntimeClient
+                client = runtime_client_factory()
+                await client.shutdown(timeout=5.0)
+
             if mcp_client_factory is None:
                 from fastmcp import Client
 

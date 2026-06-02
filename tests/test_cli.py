@@ -110,6 +110,12 @@ class FakeMcpClient:
 
 class FakeRuntimeServer:
     instances = []
+    wait_error = None
+
+    @classmethod
+    def reset(cls, *, wait_error=None):
+        cls.instances.clear()
+        cls.wait_error = wait_error
 
     def __init__(self, mcp_client):
         self.mcp_client = mcp_client
@@ -117,10 +123,16 @@ class FakeRuntimeServer:
         self.port = 9876
         self.started = False
         self.closed = False
+        self.waited_for_shutdown = False
         self.__class__.instances.append(self)
 
     async def start(self):
         self.started = True
+
+    async def wait_for_shutdown(self):
+        self.waited_for_shutdown = True
+        if self.__class__.wait_error is not None:
+            raise self.__class__.wait_error
 
     async def close(self):
         self.closed = True
@@ -347,7 +359,7 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt(tmp_path):
     stderr = FakeStderr()
     bridge = FakeBridge()
     state_file = tmp_path / "server.json"
-    FakeRuntimeServer.instances.clear()
+    FakeRuntimeServer.reset(wait_error=KeyboardInterrupt)
 
     code = await cli.run_async(
         ["connect", "--timeout", "4"],
@@ -365,6 +377,7 @@ async def test_connect_command_opens_waits_and_exits_130_on_interrupt(tmp_path):
     assert bridge.waited_timeout == 4
     assert bridge.exited is True
     assert FakeRuntimeServer.instances[0].started is True
+    assert FakeRuntimeServer.instances[0].waited_for_shutdown is True
     assert FakeRuntimeServer.instances[0].closed is True
     assert "https://colab.example/connect" in stdout.text
     assert stdout.flush_count >= 3
@@ -377,7 +390,7 @@ async def test_connect_command_exits_130_on_cancelled_sleep(tmp_path):
     stderr = FakeStderr()
     bridge = FakeBridge()
     state_file = tmp_path / "server.json"
-    FakeRuntimeServer.instances.clear()
+    FakeRuntimeServer.reset(wait_error=asyncio.CancelledError)
 
     code = await cli.run_async(
         ["connect", "--timeout", "4"],
@@ -393,6 +406,83 @@ async def test_connect_command_exits_130_on_cancelled_sleep(tmp_path):
     assert code == 130
     assert FakeRuntimeServer.instances[0].closed is True
     assert not state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_connect_command_exits_zero_on_runtime_shutdown(tmp_path):
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
+    FakeRuntimeServer.reset()
+
+    code = await cli.run_async(
+        ["connect", "--timeout", "4"],
+        bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
+        state_file=state_file,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert bridge.opened is True
+    assert FakeRuntimeServer.instances[0].waited_for_shutdown is True
+    assert FakeRuntimeServer.instances[0].closed is True
+    assert not state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_connect_replace_stops_existing_runtime_before_connecting(tmp_path):
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
+    client = FakeRuntimeClient(shutdown_result={"stopping": True})
+    FakeRuntimeServer.reset()
+
+    code = await cli.run_async(
+        ["connect", "--replace", "--timeout", "4"],
+        runtime_client_factory=lambda: client,
+        bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
+        state_file=state_file,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert client.calls[0] == ("shutdown", 5.0)
+    assert bridge.opened is True
+    assert FakeRuntimeServer.instances[0].started is True
+
+
+@pytest.mark.asyncio
+async def test_connect_replace_fails_when_shutdown_fails(tmp_path):
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    bridge = FakeBridge()
+    state_file = tmp_path / "server.json"
+    client = FakeRuntimeClient(error=RuntimeServerError("refused"))
+    FakeRuntimeServer.reset()
+
+    code = await cli.run_async(
+        ["connect", "--replace", "--timeout", "4"],
+        runtime_client_factory=lambda: client,
+        bridge_factory=lambda: bridge,
+        mcp_client_factory=FakeMcpClient,
+        runtime_server_factory=FakeRuntimeServer,
+        state_file=state_file,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 1
+    assert bridge.opened is False
+    assert FakeRuntimeServer.instances == []
+    assert "refused" in stderr.text
 
 
 @pytest.mark.asyncio
