@@ -61,6 +61,30 @@ Call one exposed tool by name with JSON arguments:
 uv run colab-cli call run_cell --json '{"code": "print(1)"}'
 ```
 
+Print a standalone Colab worker bootstrap cell:
+
+```bash
+uv run colab-cli bootstrap
+```
+
+Paste the printed cell into a fresh Colab notebook. The cell downloads the
+published bootstrap script, installs OpenSSH, starts Tailscale userspace
+networking, starts a Cloudflare quick tunnel, and prints a `READY` block:
+
+```text
+HOSTNAME=...
+COLAB_TAILSCALE_IP=100.x.y.z
+CLOUDFLARE_HOST=https://....trycloudflare.com
+```
+
+If you do not pass `--tailscale-auth-key`, Colab prints an interactive
+Tailscale login URL during setup. Use an ephemeral auth key for unattended
+startup:
+
+```bash
+uv run colab-cli bootstrap --tailscale-auth-key tskey-auth-...
+```
+
 Set up SSH in the connected Colab notebook and connect:
 
 ```bash

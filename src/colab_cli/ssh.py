@@ -10,6 +10,8 @@ from typing import Any
 
 DEFAULT_ALIAS = "colab-ssh"
 DEFAULT_WORKSPACE = "/content/workspace"
+DEFAULT_WORKER_HOSTNAME_PREFIX = "colab-worker"
+DEFAULT_SSH_PORT = 2222
 DEFAULT_BOOTSTRAP_URL = (
     "https://raw.githubusercontent.com/alanzchen/colab-cli/main/"
     "scripts/colab_ssh_bootstrap.py"
@@ -57,6 +59,35 @@ def build_setup_cell(*, bootstrap_url: str, public_key: str, workspace: str) -> 
             "namespace['setup'](",
             f"    public_key={json.dumps(public_key)},",
             f"    workspace={json.dumps(workspace)},",
+            ")",
+        ]
+    )
+
+
+def build_worker_setup_cell(
+    *,
+    bootstrap_url: str,
+    public_key: str,
+    workspace: str,
+    tailscale_auth_key: str = "",
+    hostname_prefix: str = DEFAULT_WORKER_HOSTNAME_PREFIX,
+    start_cloudflare: bool = True,
+    port: int = DEFAULT_SSH_PORT,
+) -> str:
+    return "\n".join(
+        [
+            "import urllib.request",
+            "namespace = {}",
+            f"bootstrap_url = {json.dumps(bootstrap_url)}",
+            "source = urllib.request.urlopen(bootstrap_url).read().decode('utf-8')",
+            "exec(compile(source, bootstrap_url, 'exec'), namespace)",
+            "namespace['setup_worker'](",
+            f"    public_key={json.dumps(public_key)},",
+            f"    workspace={json.dumps(workspace)},",
+            f"    port={int(port)},",
+            f"    hostname_prefix={json.dumps(hostname_prefix)},",
+            f"    tailscale_auth_key={json.dumps(tailscale_auth_key)},",
+            f"    start_cloudflare={bool(start_cloudflare)!r},",
             ")",
         ]
     )

@@ -209,6 +209,29 @@ def test_parser_accepts_ssh_command():
     assert args.ssh_args == ["--", "whoami"]
 
 
+def test_parser_accepts_bootstrap_command():
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "bootstrap",
+            "--workspace",
+            "/content/work",
+            "--tailscale-auth-key",
+            "tskey-test",
+            "--hostname-prefix",
+            "worker",
+            "--no-cloudflare",
+        ]
+    )
+
+    assert args.command == "bootstrap"
+    assert args.workspace == "/content/work"
+    assert args.tailscale_auth_key == "tskey-test"
+    assert args.hostname_prefix == "worker"
+    assert args.no_cloudflare is True
+
+
 def test_parse_json_object_rejects_invalid_json():
     with pytest.raises(cli.CliUsageError, match="Invalid JSON"):
         cli.parse_json_object("{bad json")
@@ -423,6 +446,38 @@ async def test_ssh_command_strips_argument_separator_before_connecting():
 
     assert code == 0
     assert fake.calls == [(False, ["whoami"], 60.0, 300.0)]
+    assert stderr.text == ""
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_command_prints_worker_setup_cell(monkeypatch, tmp_path):
+    from colab_cli import ssh
+
+    stdout = FakeStdout()
+    stderr = FakeStderr()
+    key_path = tmp_path / "key"
+    monkeypatch.setattr(ssh, "ensure_keypair", lambda path: "ssh-ed25519 AAAA test")
+
+    code = await cli.run_async(
+        [
+            "bootstrap",
+            "--bootstrap-url",
+            "https://example/setup.py",
+            "--key-path",
+            str(key_path),
+            "--workspace",
+            "/content/work",
+            "--no-cloudflare",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "https://example/setup.py" in stdout.text
+    assert "namespace['setup_worker'](" in stdout.text
+    assert "ssh-ed25519 AAAA test" in stdout.text
+    assert "start_cloudflare=False" in stdout.text
     assert stderr.text == ""
 
 

@@ -65,11 +65,33 @@ def test_build_setup_cell_includes_url_key_and_workspace():
     assert "/content/work" in code
 
 
+def test_build_worker_setup_cell_calls_worker_entrypoint():
+    code = ssh.build_worker_setup_cell(
+        bootstrap_url="https://example/setup.py",
+        public_key="ssh-ed25519 AAAA test",
+        workspace="/content/work",
+        tailscale_auth_key="tskey-test",
+        hostname_prefix="worker",
+        start_cloudflare=False,
+        port=2244,
+    )
+
+    assert "https://example/setup.py" in code
+    assert "namespace['setup_worker'](" in code
+    assert "ssh-ed25519 AAAA test" in code
+    assert "tskey-test" in code
+    assert "hostname_prefix=\"worker\"" in code
+    assert "start_cloudflare=False" in code
+    assert "port=2244" in code
+
+
 def test_bootstrap_script_is_public_setup_contract():
     text = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
 
     assert "def setup(" in text
+    assert "def setup_worker(" in text
     assert "COLAB_CLI_SSH_JSON=" in text
+    assert "COLAB_CLI_WORKER_JSON=" in text
     assert "colab_ssh" not in text
 
 
@@ -130,6 +152,48 @@ def test_bootstrap_setup_uses_same_port_for_sshd_and_tunnel(monkeypatch, tmp_pat
     )
 
     assert calls == [("sshd", 2244), ("tunnel", 2244)]
+
+
+def test_bootstrap_setup_worker_prints_ready_block_when_helpers_are_stubbed(
+    monkeypatch, capsys, tmp_path
+):
+    namespace = runpy.run_path(str(BOOTSTRAP_SCRIPT))
+    globals_ = namespace["setup_worker"].__globals__
+
+    monkeypatch.setitem(globals_, "ensure_worker_packages", lambda: None)
+    monkeypatch.setitem(globals_, "configure_sshd", lambda port: None)
+    monkeypatch.setitem(globals_, "install_public_key", lambda public_key: None)
+    monkeypatch.setitem(globals_, "start_sshd", lambda port: None)
+    monkeypatch.setitem(globals_, "ensure_tailscale", lambda: None)
+    monkeypatch.setitem(globals_, "start_tailscaled", lambda: None)
+    monkeypatch.setitem(globals_, "tailscale_up", lambda hostname, auth_key: None)
+    monkeypatch.setitem(globals_, "start_tailscale_serve", lambda port: True)
+    monkeypatch.setitem(globals_, "tailscale_ip", lambda: "100.64.0.1")
+    monkeypatch.setitem(globals_, "ensure_cloudflared", lambda: tmp_path / "cloudflared")
+    monkeypatch.setitem(
+        globals_,
+        "start_cloudflared_tunnel",
+        lambda cloudflared_path, port: "x.trycloudflare.com",
+    )
+    monkeypatch.setitem(globals_, "_worker_hostname", lambda prefix: "worker-123")
+
+    payload = namespace["setup_worker"](
+        public_key="ssh-ed25519 AAAA test",
+        workspace=str(tmp_path / "workspace"),
+        port=2244,
+        hostname_prefix="worker",
+        tailscale_auth_key="tskey-test",
+    )
+
+    out = capsys.readouterr().out
+    assert payload["hostname"] == "worker-123"
+    assert payload["tailscale_ip"] == "100.64.0.1"
+    assert payload["cloudflare_url"] == "https://x.trycloudflare.com"
+    assert "COLAB_CLI_WORKER_JSON=" in out
+    assert "READY" in out
+    assert "HOSTNAME=worker-123" in out
+    assert "COLAB_TAILSCALE_IP=100.64.0.1" in out
+    assert "CLOUDFLARE_HOST=https://x.trycloudflare.com" in out
 
 
 def test_parse_setup_result_extracts_json_marker():
