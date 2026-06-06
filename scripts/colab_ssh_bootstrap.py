@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -11,12 +12,15 @@ import urllib.request
 
 SSH_PORT = 2222
 SETUP_JSON_PREFIX = "COLAB_CLI_SSH_JSON="
+WORKER_JSON_PREFIX = "COLAB_CLI_WORKER_JSON="
 CLOUDFLARED_DIR = Path("/content/.colab-cli")
 CLOUDFLARED_PID = Path("/tmp/colab_cli_cloudflared.pid")
 CLOUDFLARED_LOG = Path("/tmp/colab_cli_cloudflared.log")
 SSHD_PID = Path("/tmp/colab_cli_sshd.pid")
 SSHD_CONFIG = Path("/etc/ssh/sshd_config")
 SSHD_DROP_IN = Path("/etc/ssh/sshd_config.d/00-colab-cli.conf")
+TAILSCALED_PID = Path("/tmp/colab_cli_tailscaled.pid")
+TAILSCALED_LOG = Path("/tmp/colab_cli_tailscaled.log")
 
 
 def run(command, *, check=True):
@@ -30,6 +34,28 @@ def ensure_openssh_server():
         return
     run(["apt-get", "update", "-qq"])
     run(["apt-get", "install", "-y", "-qq", "openssh-server"])
+
+
+def ensure_worker_packages():
+    if (
+        Path("/usr/sbin/sshd").exists()
+        and shutil.which("curl")
+        and shutil.which("rsync")
+    ):
+        return
+    run(["apt-get", "update", "-qq"])
+    run(
+        [
+            "apt-get",
+            "install",
+            "-y",
+            "-qq",
+            "openssh-server",
+            "curl",
+            "ca-certificates",
+            "rsync",
+        ]
+    )
 
 
 def _without_active_settings(text, names):
@@ -256,6 +282,132 @@ def start_cloudflared_tunnel(cloudflared_path, port=SSH_PORT, timeout=60):
     raise RuntimeError("cloudflared did not publish a tunnel hostname\n" + log)
 
 
+def ensure_tailscale():
+    if Path("/usr/bin/tailscale").exists():
+        return
+    run(["bash", "-lc", "curl -fsSL https://tailscale.com/install.sh | sh"])
+
+
+def _stop_existing_tailscaled():
+    pid = None
+    if TAILSCALED_PID.exists():
+        try:
+            pid = int(TAILSCALED_PID.read_text(encoding="utf-8").strip())
+        except ValueError:
+            TAILSCALED_PID.unlink(missing_ok=True)
+        else:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pid = None
+            TAILSCALED_PID.unlink(missing_ok=True)
+    subprocess.run(["pkill", "-x", "tailscaled"], check=False)
+    if pid is None:
+        return
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+
+
+def start_tailscaled():
+    _stop_existing_tailscaled()
+    Path("/var/run/tailscale").mkdir(parents=True, exist_ok=True)
+    log_handle = TAILSCALED_LOG.open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [
+            "tailscaled",
+            "--state=mem:",
+            "--tun=userspace-networking",
+            "--socks5-server=127.0.0.1:1055",
+            "--outbound-http-proxy-listen=127.0.0.1:1055",
+        ],
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    log_handle.close()
+    TAILSCALED_PID.write_text(str(process.pid), encoding="utf-8")
+    time.sleep(3)
+
+
+def tailscale_up(hostname, auth_key=""):
+    command = ["tailscale", "up", f"--hostname={hostname}", "--accept-dns=false"]
+    if auth_key.strip():
+        command.append("--auth-key=" + auth_key.strip())
+    run(command)
+
+
+def start_tailscale_serve(port=SSH_PORT):
+    result = run(
+        [
+            "tailscale",
+            "serve",
+            "--bg",
+            f"--tcp={port}",
+            f"tcp://127.0.0.1:{port}",
+        ],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def tailscale_ip():
+    for _ in range(5):
+        try:
+            output = subprocess.check_output(["tailscale", "ip", "-4"], text=True)
+        except subprocess.CalledProcessError:
+            output = ""
+        for line in output.splitlines():
+            value = line.strip()
+            if value:
+                return value
+        time.sleep(1)
+    raise RuntimeError("tailscale did not report an IPv4 address")
+
+
+def _worker_hostname(prefix):
+    safe_prefix = re.sub(r"[^A-Za-z0-9-]+", "-", prefix).strip("-")
+    if not safe_prefix:
+        safe_prefix = "colab-worker"
+    return f"{safe_prefix}-{int(time.time())}"
+
+
+def _print_worker_ready(payload, port):
+    print(WORKER_JSON_PREFIX + json.dumps(payload, sort_keys=True))
+    print("\nREADY")
+    print(f"HOSTNAME={payload['hostname']}")
+    print(f"COLAB_TAILSCALE_IP={payload['tailscale_ip']}")
+    if payload.get("cloudflare_url"):
+        print(f"CLOUDFLARE_HOST={payload['cloudflare_url']}")
+
+    print("\nLocal Tailscale SSH test:")
+    print(
+        "ssh -i ~/.ssh/colab_cli_ed25519 "
+        f"-p {port} -o StrictHostKeyChecking=no "
+        f"root@{payload['tailscale_ip']} 'hostname && pwd'"
+    )
+
+    print("\nLocal sshfs mount:")
+    print("mkdir -p /tmp/colabfs")
+    print(
+        "sshfs "
+        f"-p {port} "
+        "-o IdentityFile=~/.ssh/colab_cli_ed25519,"
+        "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 "
+        f"root@{payload['tailscale_ip']}:/content /tmp/colabfs"
+    )
+
+    if payload.get("cloudflare_url"):
+        print("\nCloudflare SSH host for bulk upload:")
+        print(payload["cloudflare_url"])
+
+
 def setup(public_key, workspace="/content/workspace", port=SSH_PORT):
     workspace_path = Path(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
@@ -274,4 +426,52 @@ def setup(public_key, workspace="/content/workspace", port=SSH_PORT):
         "workspace": str(workspace_path),
     }
     print(SETUP_JSON_PREFIX + json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def setup_worker(
+    public_key,
+    workspace="/content/workspace",
+    port=SSH_PORT,
+    hostname_prefix="colab-worker",
+    tailscale_auth_key="",
+    start_cloudflare=True,
+):
+    workspace_path = Path(workspace)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+
+    ensure_worker_packages()
+    configure_sshd(port)
+    install_public_key(public_key)
+    start_sshd(port)
+
+    hostname = _worker_hostname(hostname_prefix)
+    ensure_tailscale()
+    start_tailscaled()
+    tailscale_up(hostname, tailscale_auth_key)
+    serve_ok = start_tailscale_serve(port)
+    ts_ip = tailscale_ip()
+
+    cloudflare_host = ""
+    if start_cloudflare:
+        cloudflared_path = ensure_cloudflared()
+        cloudflare_host = start_cloudflared_tunnel(cloudflared_path, port)
+
+    payload = {
+        "hostname": hostname,
+        "port": port,
+        "user": "root",
+        "workspace": str(workspace_path),
+        "tailscale_ip": ts_ip,
+        "tailscale_serve": serve_ok,
+        "cloudflare_host": cloudflare_host,
+        "cloudflare_url": f"https://{cloudflare_host}" if cloudflare_host else "",
+    }
+
+    if not serve_ok:
+        print(
+            "WARN: tailscale serve failed; direct Tailscale SSH may not work "
+            "in userspace mode."
+        )
+    _print_worker_ready(payload, port)
     return payload

@@ -91,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     ssh.add_argument("--cloudflared-path")
     ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
 
+    bootstrap = subparsers.add_parser(
+        "bootstrap",
+        help="Print a standalone Colab worker setup cell.",
+    )
+    bootstrap.add_argument("--workspace", default="/content/workspace")
+    bootstrap.add_argument("--bootstrap-url")
+    bootstrap.add_argument("--key-path")
+    bootstrap.add_argument("--tailscale-auth-key", default="")
+    bootstrap.add_argument("--hostname-prefix", default="colab-worker")
+    bootstrap.add_argument("--port", type=int, default=2222)
+    bootstrap.add_argument("--no-cloudflare", action="store_true")
+
     return parser
 
 
@@ -245,6 +257,34 @@ async def run_async(
                 sleep,
                 state_file,
             )
+
+        if args.command == "bootstrap":
+            from colab_cli.ssh import (
+                build_worker_setup_cell,
+                default_bootstrap_url,
+                default_key_path,
+                ensure_keypair,
+            )
+
+            key_path = (
+                Path(args.key_path).expanduser()
+                if args.key_path
+                else default_key_path()
+            )
+            public_key = ensure_keypair(key_path)
+            stdout.write(
+                build_worker_setup_cell(
+                    bootstrap_url=args.bootstrap_url or default_bootstrap_url(),
+                    public_key=public_key,
+                    workspace=args.workspace,
+                    tailscale_auth_key=args.tailscale_auth_key,
+                    hostname_prefix=args.hostname_prefix,
+                    start_cloudflare=not args.no_cloudflare,
+                    port=args.port,
+                )
+                + "\n"
+            )
+            return 0
 
         if runtime_client_factory is None:
             runtime_client_factory = RuntimeClient
