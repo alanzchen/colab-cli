@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -36,6 +37,12 @@ def ensure_openssh_server():
 
 
 def ensure_worker_packages():
+    if (
+        Path("/usr/sbin/sshd").exists()
+        and shutil.which("curl")
+        and shutil.which("rsync")
+    ):
+        return
     run(["apt-get", "update", "-qq"])
     run(
         [
@@ -282,6 +289,7 @@ def ensure_tailscale():
 
 
 def _stop_existing_tailscaled():
+    pid = None
     if TAILSCALED_PID.exists():
         try:
             pid = int(TAILSCALED_PID.read_text(encoding="utf-8").strip())
@@ -291,9 +299,19 @@ def _stop_existing_tailscaled():
             try:
                 os.kill(pid, 15)
             except ProcessLookupError:
-                pass
+                pid = None
             TAILSCALED_PID.unlink(missing_ok=True)
     subprocess.run(["pkill", "-x", "tailscaled"], check=False)
+    if pid is None:
+        return
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
 
 
 def start_tailscaled():
@@ -340,11 +358,16 @@ def start_tailscale_serve(port=SSH_PORT):
 
 
 def tailscale_ip():
-    output = subprocess.check_output(["tailscale", "ip", "-4"], text=True)
-    for line in output.splitlines():
-        value = line.strip()
-        if value:
-            return value
+    for _ in range(5):
+        try:
+            output = subprocess.check_output(["tailscale", "ip", "-4"], text=True)
+        except subprocess.CalledProcessError:
+            output = ""
+        for line in output.splitlines():
+            value = line.strip()
+            if value:
+                return value
+        time.sleep(1)
     raise RuntimeError("tailscale did not report an IPv4 address")
 
 

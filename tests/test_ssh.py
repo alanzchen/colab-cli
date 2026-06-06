@@ -1,6 +1,7 @@
 from pathlib import Path
 import runpy
-from subprocess import CompletedProcess
+import shutil
+from subprocess import CalledProcessError, CompletedProcess
 
 from colab_cli import ssh
 
@@ -194,6 +195,80 @@ def test_bootstrap_setup_worker_prints_ready_block_when_helpers_are_stubbed(
     assert "HOSTNAME=worker-123" in out
     assert "COLAB_TAILSCALE_IP=100.64.0.1" in out
     assert "CLOUDFLARE_HOST=https://x.trycloudflare.com" in out
+
+
+def test_ensure_worker_packages_skips_install_when_binaries_exist(monkeypatch):
+    namespace = runpy.run_path(str(BOOTSTRAP_SCRIPT))
+    globals_ = namespace["ensure_worker_packages"].__globals__
+    calls = []
+
+    monkeypatch.setitem(
+        globals_,
+        "run",
+        lambda command, check=True: calls.append(command),
+    )
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/usr/sbin/sshd")
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in {"curl", "rsync"} else None,
+    )
+
+    namespace["ensure_worker_packages"]()
+
+    assert calls == []
+
+
+def test_stop_existing_tailscaled_waits_for_tracked_pid_to_exit(
+    monkeypatch, tmp_path
+):
+    namespace = runpy.run_path(str(BOOTSTRAP_SCRIPT))
+    globals_ = namespace["_stop_existing_tailscaled"].__globals__
+    pid_file = tmp_path / "tailscaled.pid"
+    pid_file.write_text("1234", encoding="utf-8")
+    kill_calls = []
+
+    def fake_kill(pid, signal):
+        kill_calls.append((pid, signal))
+        if signal == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setitem(globals_, "TAILSCALED_PID", pid_file)
+    monkeypatch.setattr(globals_["os"], "kill", fake_kill)
+    monkeypatch.setattr(globals_["subprocess"], "run", lambda *args, **kwargs: None)
+
+    namespace["_stop_existing_tailscaled"]()
+
+    assert kill_calls == [(1234, 15), (1234, 0)]
+    assert not pid_file.exists()
+
+
+def test_tailscale_ip_retries_until_address_is_available(monkeypatch):
+    namespace = runpy.run_path(str(BOOTSTRAP_SCRIPT))
+    globals_ = namespace["tailscale_ip"].__globals__
+    calls = []
+    sleeps = []
+
+    def fake_check_output(command, text):
+        calls.append(command)
+        if len(calls) < 3:
+            raise CalledProcessError(1, command)
+        return "\n100.64.0.1\n"
+
+    monkeypatch.setattr(globals_["subprocess"], "check_output", fake_check_output)
+    monkeypatch.setattr(
+        globals_["time"],
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    assert namespace["tailscale_ip"]() == "100.64.0.1"
+    assert calls == [
+        ["tailscale", "ip", "-4"],
+        ["tailscale", "ip", "-4"],
+        ["tailscale", "ip", "-4"],
+    ]
+    assert sleeps == [1, 1]
 
 
 def test_parse_setup_result_extracts_json_marker():
